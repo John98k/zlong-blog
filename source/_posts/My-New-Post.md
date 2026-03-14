@@ -3,3 +3,517 @@ title: My New Post
 date: 2026-03-14 19:30:38
 tags:
 ---
+
+# Java 面试提问及专业答案：涵盖多技术领域
+
+---
+
+## （一）Java 基础模块
+
+### 问题 1：HashMap 的扩容机制是什么？JDK7 和 JDK8 在扩容实现上有哪些核心区别？
+
+**答案：**
+
+#### 1. 核心扩容机制
+
+HashMap 的扩容触发条件是当前元素数量（size）≥ 阈值（capacity × loadFactor）（默认负载因子 0.75），扩容时容量翻倍（2 倍），并重新计算元素的存储位置（rehash）。
+
+#### 2. JDK7 vs JDK8 核心区别
+
+- **扩容时机**：JDK7 在添加元素前检查是否扩容；JDK8 在添加元素后检查
+- **链表处理**：JDK7 扩容时采用头插法，多线程下可能导致链表成环；JDK8 采用尾插法，避免环的问题，且当链表长度 ≥8、数组容量 ≥64 时会转为红黑树
+- **Hash 值计算**：JDK7 多次扰动（9 次异或 + 4 次移位）；JDK8 简化为 `(key == null) ? 0 : (h = key.hashCode()) ^ (h >>> 16)`，结合数组长度减 1 取模，减少哈希冲突
+- **扩容后索引计算**：JDK7 需重新计算 hash 值取模；JDK8 利用扩容后容量是 2 的幂，通过 原索引 + 旧容量 直接推导新索引，提升效率
+
+---
+
+### 问题 2：单例模式的核心设计目标是什么？请列举 3 种常见实现方式，并说明线程安全的关键要点。
+
+**答案：**
+
+#### 1. 核心目标
+
+保证一个类在内存中只有一个实例，且提供全局唯一的访问入口。
+
+#### 2. 常见实现及线程安全要点
+
+##### 饿汉式
+
+类加载时直接初始化实例，天然线程安全（JVM 类加载机制保证初始化原子性），但可能造成资源浪费（实例未使用也会加载）。
+
+```java
+public class Singleton {
+    private static final Singleton INSTANCE = new Singleton();
+
+    private Singleton() {} // 私有构造器防止外部实例化
+
+    public static Singleton getInstance() {
+        return INSTANCE;
+    }
+}
+```
+
+##### 懒汉式（双重校验锁 DCL）
+
+延迟初始化，通过 volatile 禁止指令重排、双重判空避免多线程重复创建。
+
+```java
+public class Singleton {
+    private static volatile Singleton INSTANCE; // volatile 关键，防止指令重排
+
+    private Singleton() {}
+
+    public static Singleton getInstance() {
+        if (INSTANCE == null) { // 第一层判空：减少锁竞争
+            synchronized (Singleton.class) {
+                if (INSTANCE == null) { // 第二层判空：防止多线程同时进入锁块
+                    INSTANCE = new Singleton();
+                }
+            }
+        }
+        return INSTANCE;
+    }
+}
+```
+
+##### 静态内部类
+
+利用 JVM 类加载的懒加载特性，线程安全且性能优（内部类仅在调用 getInstance 时加载）。
+
+```java
+public class Singleton {
+    private Singleton() {}
+
+    private static class SingletonHolder {
+        private static final Singleton INSTANCE = new Singleton();
+    }
+
+    public static Singleton getInstance() {
+        return SingletonHolder.INSTANCE;
+    }
+}
+```
+
+---
+
+## （二）数据库技术模块
+
+### 问题 1：MySQL 的 MVCC 机制原理是什么？它如何支撑"可重复读"隔离级别？
+
+**答案：**
+
+#### 1. MVCC（多版本并发控制）核心
+
+为每行数据维护多个版本，不同事务看到不同版本的数据，避免读写阻塞，提升并发性能。
+
+#### 2. 核心实现依赖
+
+- **隐藏字段**：每行数据包含 `DB_TRX_ID`（创建该版本的事务 ID）、`DB_ROLL_PTR`（回滚指针，指向 undo log 中的历史版本）、`DB_ROW_ID`（隐式主键）
+- **Undo Log**：保存数据的历史版本，事务回滚或 MVCC 读取时使用，按事务 ID 有序串联
+- **Read View**：事务开启时生成的快照，包含 4 个核心字段：m_ids（当前活跃事务 ID 集合）、min_trx_id（最小活跃事务 ID）、max_trx_id（下一个分配的事务 ID）、creator_trx_id（当前事务 ID）
+
+#### 3. 支撑可重复读的逻辑
+
+- 可重复读隔离级别下，事务仅在启动时生成一次 Read View，后续读取均基于该快照
+- 读取数据时，通过 Read View 判断版本可见性：仅当数据版本的 `DB_TRX_ID < min_trx_id`（事务已提交）或 `DB_TRX_ID == creator_trx_id`（自身修改）时可见，否则通过 `DB_ROLL_PTR` 回溯历史版本，直到找到可见版本
+- 对比读已提交：读已提交每次查询都会生成新的 Read View，因此会出现"不可重复读"，而可重复读通过固定 Read View 避免该问题
+
+---
+
+### 问题 2：你有线上慢 SQL 优化的实战经验，请说明你的优化思路和具体案例？
+
+**答案：**
+
+#### 1. 通用优化思路（四步走）
+
+- **定位**：通过 `show processlist`、`slow_query_log`（慢查询日志）、`explain` 执行计划定位慢 SQL
+- **分析**：重点看 type（访问类型，如 ALL/Range/Ref/eq_ref）、key（是否命中索引）、rows（扫描行数）、Extra（如 Using filesort/Using temporary）
+- **优化**：优先加索引、优化 SQL 逻辑、拆分大 SQL、调整表结构
+- **验证**：优化后重新执行 explain，对比执行时间、扫描行数确认效果
+
+#### 2. 实战案例
+
+**场景**：电商订单表（order）有 500 万数据，查询"近 30 天某用户的已支付订单"的 SQL 耗时 8 秒
+
+```sql
+-- 原慢 SQL
+SELECT * FROM `order` WHERE user_id = 12345 AND pay_status = 1 AND create_time >= '2026-01-01';
+```
+
+**分析**：explain 显示 type=ALL（全表扫描），Extra=Using where，未命中索引
+
+**优化**：
+1. 步骤 1：创建联合索引 `idx_user_pay_create(user_id, pay_status, create_time)`（遵循最左前缀原则）
+2. 步骤 2：避免 `SELECT *`，只查询需要的字段（如 order_id、order_amount、create_time）
+
+**优化后效果**：执行时间从 8 秒降至 50ms，扫描行数从 500 万降至 100 以内
+
+---
+
+### 问题 3：TDSQL 分布式数据库与原生 MySQL 在 SQL 语法上有哪些兼容问题？你是如何解决的？
+
+**答案：**
+
+#### 1. 核心兼容问题
+
+- **分库分表相关**：原生 MySQL 支持的 `SELECT * FROM t FOR UPDATE`（全局锁）在 TDSQL 中可能失效，需指定分片键
+- **函数兼容**：部分 MySQL 特有函数（如 GROUP_CONCAT 默认长度限制、UUID()）在 TDSQL 中行为不一致
+- **事务支持**：跨分片事务（XA 事务）性能差，且部分 DDL 语句（如 ALTER TABLE）不支持跨分片
+- **索引限制**：TDSQL 对联合索引长度、唯一索引（需包含分片键）有严格限制
+
+#### 2. 解决策略
+
+- **语法适配**：封装 SQL 解析工具，对不兼容函数做替换（如 GROUP_CONCAT 改为自定义函数）
+- **分片优化**：设计表结构时明确分片键，避免跨分片操作，优先使用单分片事务
+- **索引调整**：唯一索引必须包含分片键，联合索引长度控制在 TDSQL 限制范围内（如 1024 字节）
+- **降级处理**：对跨分片的强一致性需求场景，采用"最终一致性"方案（如消息队列补偿）
+
+---
+
+### 问题 4：缓存穿透、击穿、雪崩
+
+**答案：**
+
+| 概念 | 定义 | 解决方案 |
+|------|------|----------|
+| **穿透** | 查不存在的数据 | 空值、布隆过滤器 |
+| **击穿** | 热点 key 过期 | 互斥锁、永不过期 |
+| **雪崩** | 大量 key 失效或 Redis 挂了 | 随机过期、集群、多级缓存、限流降级 |
+
+#### 穿透
+
+- 查不存在的 key，影响单个请求
+- 解决方案：布隆过滤器 + 缓存空值
+
+#### 击穿
+
+- 热点 key 过期，影响单个热点
+- 解决方案：互斥锁、热点 key 永不过期
+
+#### 雪崩
+
+- 大量 key 失效或缓存宕机，影响整个系统
+- 解决方案：
+  - 过期时间加随机值：避免集体失效
+  - 多级缓存：本地缓存 (Caffeine) + Redis
+  - Redis 高可用：主从 + 哨兵 / 集群
+  - 限流 + 降级：保护数据库
+  - 互斥锁 / 队列：控制数据库并发
+
+---
+
+### 问题 5：限流与降级
+
+#### 1. 限流（Rate Limit）
+
+- **目的**：防止流量太大把系统压垮
+- **手段**：限制 QPS、限制并发数
+- **表现**：直接拒绝、返回繁忙、排队
+
+#### 2. 降级（Degradation）
+
+- **目的**：核心功能必须保住，非核心先停掉
+- **场景**：大促、流量暴涨、依赖故障
+- **手段**：
+  - 关闭非核心接口 / 功能
+  - 直接返回默认值、缓存数据、静态页面
+- **例子**：电商大促关闭推荐、评论、积分，只保留下单 & 支付
+
+> 一句话：功能可以少，但系统不能死。
+
+---
+
+### 问题 6：TDSQL vs MySQL 核心差异对比
+
+1. **TDSQL 是 MySQL 的分布式增强版**，100% 兼容 MySQL 语法/协议，业务迁移成本极低
+2. **核心差异在于分布式能力、高可用、企业级特性**：TDSQL 原生解决了 MySQL 的扩容、容灾、资源隔离痛点
+3. **选型核心**：中小规模/低成本场景选 MySQL，高并发/大容量/高可用要求的核心业务选 TDSQL
+
+---
+
+## （三）框架与中间件模块
+
+### 问题 1：Spring Bean 的加载过程是怎样的？请描述核心步骤。
+
+**答案：**
+
+Spring Bean 加载核心流程（以 XML 配置为例）：
+
+1. **资源加载**：ApplicationContext 加载配置文件（如 applicationContext.xml），解析为 BeanDefinition（包含 Bean 的类名、作用域、依赖等信息）
+2. **BeanDefinition 注册**：将解析后的 BeanDefinition 注册到 BeanDefinitionRegistry（核心容器）
+3. **实例化前处理**：调用 BeanPostProcessor 的 `postProcessBeforeInstantiation` 方法（如 AOP 的代理前置处理）
+4. **实例化**：通过反射创建 Bean 实例（无参构造器），生成 BeanWrapper 包装实例
+5. **属性填充**：为 Bean 设置属性（依赖注入），处理 @Autowired、@Value 等注解，解决循环依赖（通过三级缓存：singletonObjects、earlySingletonObjects、singletonFactories）
+6. **初始化前处理**：调用 BeanPostProcessor 的 `postProcessBeforeInitialization` 方法
+7. **初始化**：执行 InitializingBean 的 `afterPropertiesSet` 方法，或自定义 init-method
+8. **初始化后处理**：调用 BeanPostProcessor 的 `postProcessAfterInitialization` 方法（如 AOP 生成代理对象）
+9. **注册销毁钩子**：若 Bean 实现 DisposableBean 或配置 destroy-method，注册销毁回调
+10. **存入单例池**：将初始化完成的 Bean 存入 singletonObjects（单例池），供后续获取
+
+---
+
+### 问题 2：SpringBoot 自动装配的原理是什么？核心注解和流程是怎样的？
+
+**答案：**
+
+#### 1. 核心原理
+
+基于 SPI（服务提供者接口）机制，自动扫描并加载符合条件的配置类，无需手动 XML 配置。
+
+#### 2. 核心注解
+
+- **@SpringBootApplication**：组合注解，核心包含 @EnableAutoConfiguration（开启自动装配）、@ComponentScan（扫描组件）、@Configuration（配置类）
+- **@EnableAutoConfiguration**：通过 @Import(AutoConfigurationImportSelector.class) 加载自动配置类
+- **@Conditional 系列注解**：如 @ConditionalOnClass（存在指定类时生效）、@ConditionalOnMissingBean（不存在指定 Bean 时生效），控制自动配置是否生效
+
+#### 3. 自动装配流程
+
+1. 启动时，AutoConfigurationImportSelector 通过 SpringFactoriesLoader 扫描 META-INF/spring.factories 文件，加载所有 org.springframework.boot.autoconfigure.EnableAutoConfiguration 对应的配置类
+2. 对加载的配置类，通过 @Conditional 注解过滤（如缺少 Redis 客户端依赖则跳过 RedisAutoConfiguration）
+3. 将过滤后的配置类注入 Spring 容器，完成自动装配（如 DataSourceAutoConfiguration 自动配置数据源）
+
+---
+
+### 问题 3：Nacos 的服务注册与发现机制是什么？你研究过哪些核心源码逻辑？
+
+**答案：**
+
+#### 1. 服务注册机制
+
+- **客户端**：服务启动时，通过 NacosNamingService 向 Nacos Server 发送注册请求（包含服务名、IP、端口、元数据等），默认每 5 秒发送心跳包（beat）
+- **服务端**：接收注册请求后，将服务实例信息存入 ServiceManager（内存），同时持久化到嵌入式数据库（Derby）；心跳超时（默认 15 秒）则标记实例为不健康，30 秒未心跳则剔除
+
+#### 2. 服务发现机制
+
+- **客户端**：通过 subscribe 方法订阅服务，Nacos 支持两种模式：
+  - **拉取模式（Pull）**：客户端默认每 6 秒主动拉取服务实例列表
+  - **推送模式（Push）**：服务端感知实例变化时，通过 TCP 长连接主动推送更新
+
+#### 3. 核心源码研究
+
+- **注册核心**：NamingProxy.registerInstance()（客户端注册入口）、InstanceController.register()（服务端处理注册）
+- **心跳核心**：BeatReactor（客户端心跳线程）、InstanceController.beat()（服务端心跳处理）
+- **发现核心**：NamingService.subscribe()（订阅入口）、PushReceiver（客户端推送接收线程）
+
+---
+
+### 问题 4：Redis 分布式锁如何实现？需要解决哪些核心问题？
+
+**答案：**
+
+#### 1. 基础实现（Redis 单节点）
+
+```java
+public boolean lock(String key, String requestId, long expireTime) {
+    // SETNX + EXPIRE 原子化，避免死锁
+    String result = jedis.set(key, requestId, SetParams.setParams().nx().px(expireTime));
+    return "OK".equals(result);
+}
+
+public boolean unlock(String key, String requestId) {
+    // Lua 脚本保证删除的原子性，避免误删其他线程的锁
+    String script = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
+    Long result = (Long) jedis.eval(script, Collections.singletonList(key), Collections.singletonList(requestId));
+    return result == 1;
+}
+```
+
+#### 2. 核心问题及解决策略
+
+- **死锁**：设置过期时间（expire），且保证 SETNX 和 EXPIRE 原子性（Redis 2.6.12+ 支持 `set nx px`）
+- **误删**：解锁时通过 Lua 脚本校验 requestId（仅删除自己加的锁）
+- **过期时间不足**：开启"看门狗"线程，在锁即将过期时自动续期（如 Redisson 的 RedLock）
+- **集群一致性**：单节点 Redis 故障导致锁失效，采用 RedLock 算法（多节点加锁，超过半数成功则锁生效）
+
+---
+
+### 问题 5：Spring 事务传播机制
+
+**答案：**
+
+Spring 事务传播机制定义了多个带事务的方法相互调用时，事务如何传播和嵌套。
+
+| 传播行为 | 说明 |
+|----------|------|
+| REQUIRED | 如果当前有事务就加入，没有就新建 |
+| SUPPORTS | 有事务就加入，没有就以非事务执行 |
+| MANDATORY | 必须在事务中执行，否则抛异常 |
+| REQUIRES_NEW | 不管当前有没有事务，都新建一个事务，原事务暂停 |
+| NOT_SUPPORTED | 以非事务执行，原事务暂停 |
+| NEVER | 必须在非事务中执行，否则抛异常 |
+| NESTED | 如果当前有事务，就嵌套一个子事务 |
+
+**金融场景**：
+- 转账时扣钱和加钱方法通常用 REQUIRED，确保在同一事务
+- 日志记录可能用 REQUIRES_NEW，避免日志失败影响主交易
+
+---
+
+### 问题 6：事务失效原因
+
+**答案：**
+
+`@Transactional` 注解失效的常见原因：
+
+1. **自调用问题**：如果在同一个类里，非事务方法调用事务方法，或者事务方法直接调用另一个事务方法，因为 Spring 事务基于 AOP 代理，自调用时不会走代理，导致事务失效
+2. **方法访问权限**：注解只能用在 public 方法上，private、protected 或默认权限的方法加了也无效
+3. **异常被捕获未抛出**：如果事务方法里的异常被 try-catch 捕获了，没往外抛，Spring 感知不到异常，就不会触发回滚
+4. **异常类型不匹配**：默认只对 RuntimeException 和 Error 回滚，如果方法抛的是受检异常，得手动指定 rollbackFor 属性才会回滚
+5. **多线程调用**：子线程的异常不会影响父线程的事务，也可能导致部分操作无法回滚
+
+---
+
+## （四）Nginx 模块
+
+### 问题 1：如何使用 Nginx 实现动静分离？核心配置是什么？
+
+**答案：**
+
+#### 1. 动静分离核心思路
+
+将静态资源（JS/CSS/图片）和动态请求（Java 接口）分开处理，静态资源由 Nginx 直接返回，动态请求转发到后端 Tomcat 等应用服务器，提升性能。
+
+#### 2. 核心配置示例
+
+```nginx
+http {
+    # 定义静态资源路径
+    server {
+        listen 80;
+        server_name www.example.com;
+
+        # 静态资源匹配规则：JS/CSS/图片等直接返回
+        location ~* \.(js|css|png|jpg|gif)$ {
+            root /usr/local/nginx/html/static;
+            expires 7d;
+            gzip on;
+        }
+
+        # 动态请求转发到后端 Tomcat 集群
+        location /api/ {
+            proxy_pass http://tomcat_cluster;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+    }
+
+    # 定义后端 Tomcat 集群
+    upstream tomcat_cluster {
+        server 192.168.1.100:8080 weight=1;
+        server 192.168.1.101:8080 weight=1;
+    }
+}
+```
+
+---
+
+### 问题 2：Nginx 的负载均衡有哪些策略？各自的适用场景是什么？
+
+**答案：**
+
+| 策略 | 说明 | 适用场景 |
+|------|------|----------|
+| 轮询（默认） | 请求按顺序分配给后端节点 | 节点性能相近 |
+| 加权轮询（weight） | 按权重分配请求 | 节点性能差异大 |
+| IP 哈希（ip_hash） | 按客户端 IP 哈希值分配节点 | 会话粘滞 |
+| 最少连接（least_conn） | 请求分配给当前连接数最少的节点 | 请求处理时间差异大 |
+| URL 哈希 | 按请求 URL 哈希分配节点 | 静态资源缓存优化 |
+
+```nginx
+upstream tomcat_cluster {
+    server 192.168.1.100:8080 weight=2;  # 接收 2/3 请求
+    server 192.168.1.101:8080 weight=1;  # 接收 1/3 请求
+}
+```
+
+---
+
+## （五）RabbitMQ 模块
+
+### 问题 1：RabbitMQ 如何保证消息的可靠性投递？请从生产者到消费者全链路分析。
+
+**答案：**
+
+#### 1. 生产者端
+
+- **确认机制（publisher-confirm）**：开启 publisher-confirm-type=correlated，消息发送到交换机后，RabbitMQ 返回确认回调，未确认则重试
+- **退回机制（publisher-return）**：消息到达交换机但未绑定队列时，触发 return 回调，处理未路由消息
+- **本地事务/消息表**：重要消息先写入本地数据库（消息表），发送成功后更新状态，失败则重试（最终一致性）
+
+#### 2. 交换机/队列端
+
+- **持久化**：交换机、队列、消息均设置为持久化（durable=true），避免 MQ 重启丢失
+- **镜像队列**：开启队列镜像，节点故障时自动切换，保证队列高可用
+
+#### 3. 消费者端
+
+- **手动 ACK**：关闭自动 ACK（autoAck=false），业务处理完成后手动调用 channel.basicAck()；处理失败则 basicNack（重新入队）或 basicReject（拒绝）
+- **幂等处理**：消费者接收消息时，通过消息 ID 做幂等校验（如存入 Redis，已处理则直接返回），避免重复消费
+
+---
+
+### 问题 2：RabbitMQ 的延迟队列有哪些实现方式？各自的优缺点是什么？
+
+**答案：**
+
+#### 方式 1：死信队列（DLX）+ TTL
+
+- **原理**：创建普通队列 A（设置死信交换机 DLX、死信路由键），消息设置 TTL，过期后自动进入死信队列 B，消费者监听队列 B
+- **优点**：无需额外插件，原生支持
+- **缺点**：TTL 是队列级别时，消息按顺序过期（队首消息未过期，后续消息无法过期）；消息级别 TTL 会增加 MQ 性能开销
+
+#### 方式 2：延迟插件（rabbitmq_delayed_message_exchange）
+
+- **原理**：安装延迟交换机插件，创建 x-delayed-message 类型的交换机，消息携带 x-delay 头指定延迟时间，到期后转发到目标队列
+- **优点**：支持任意延迟时间，无顺序过期问题，性能更优
+- **缺点**：需要安装第三方插件，依赖 MQ 版本（3.5.8+ 支持）
+
+#### 选型建议
+
+- 低延迟、小批量场景用死信队列
+- 高延迟、大批量场景用延迟插件
+
+---
+
+## （六）信创适配模块
+
+### 问题 1：你在国产化改造中，宝蓝德应用中间件的适配遇到了哪些问题？如何解决？
+
+**答案：**
+
+#### 1. 核心适配问题
+
+- **容器兼容**：宝蓝德中间件对 SpringBoot 打包的 WAR 包支持性差，部分 Servlet 3.1 特性不兼容
+- **配置差异**：宝蓝德的数据源、JVM 参数配置方式与 Tomcat 不同，且不支持部分 Tomcat 特有配置
+
+#### 2. 解决方案
+
+- 更换兼容的中间件版本或使用嵌入式容器
+- 手动迁移配置项，参考宝蓝德官方文档
+- 避免使用 Tomcat 特有特性
+
+---
+
+### 问题 2：MySQL 与达梦（DM）数据库的语法差异
+
+**答案：**
+
+#### 1. 核心语法差异
+
+| 差异点 | MySQL | 达梦 |
+|--------|-------|------|
+| 字符串函数 | CONCAT_WS | WM_CONCAT |
+| 字符串函数 | SUBSTRING | SUBSTR |
+| 日期函数 | DATE_FORMAT | TO_CHAR |
+| 日期函数 | NOW() | SYSDATE |
+| 分页语法 | LIMIT offset, rows | ROW_NUMBER() OVER() 或 TOP n |
+| 主键自增 | AUTO_INCREMENT | IDENTITY(1,1) |
+| 注释语法 | -- / # | -- （需加空格） |
+
+#### 2. 数据迁移注意事项
+
+- **结构迁移**：使用达梦迁移工具（DTS）转换表结构，手动修正函数/语法差异
+- **数据类型**：MySQL 的 VARCHAR 无长度单位，达梦需指定 VARCHAR(100 CHAR)；DATETIME 达梦用 TIMESTAMP 替代
+- **索引迁移**：达梦对索引名称长度、联合索引数量有限制，需调整
+- **事务迁移**：达梦的事务隔离级别默认是"读提交"，需手动调整为"可重复读"（匹配 MySQL）
+- **验证**：迁移后执行全量 SQL 校验（如 COUNT(*) 对比），确保数据一致性
